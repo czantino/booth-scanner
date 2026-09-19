@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0E2230">
+  <title>Scan a booth QR code</title>
+  <style>
+    :root {
+      --ink: #0E2230;
+      --ink-3: #5C7381;
+      --paper: #EFF3F4;
+      --line: #D7E0E4;
+      --done: #0B7A5C;
+      --danger: #A32318;
+      --warn-bg: #FBF0E1;
+      --warn-ink: #7A4708;
+      --font: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--font);
+      line-height: 1.55;
+    }
+    .bar { background: var(--ink); color: #fff; padding: 14px 18px; font-weight: 700; font-size: 15px; }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 18px 16px 48px; }
+    .panel {
+      background: #fff; border: 1px solid var(--line);
+      border-radius: 22px; padding: 22px 18px 24px;
+    }
+    h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: -.02em; }
+    .lede { margin: 0 0 18px; color: var(--ink-3); font-size: 15px; }
+    #reader { width: 100%; min-height: 260px; border-radius: 16px; overflow: hidden; background: #0B1A24; }
+    #reader video, #reader canvas { width: 100% !important; display: block; }
+    .status { margin: 12px 0 0; font-size: 14px; color: var(--ink-3); text-align: center; }
+    .status.is-good { color: var(--done); font-weight: 650; }
+    .status.is-bad { color: var(--danger); font-weight: 650; }
+    .notice {
+      background: var(--warn-bg); color: var(--warn-ink);
+      border-radius: 12px; padding: 12px 14px; margin: 16px 0 0; font-size: 14px;
+    }
+    .notice p { margin: 0 0 6px; }
+    .notice p:last-child { margin: 0; }
+    .field { margin: 18px 0 10px; }
+    label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+    input {
+      width: 100%; padding: 13px 14px; font: inherit;
+      border: 1.5px solid var(--line); border-radius: 10px; background: #FBFCFC;
+    }
+    .btn {
+      display: flex; align-items: center; justify-content: center;
+      width: 100%; min-height: 52px; margin-top: 10px; padding: 12px 20px;
+      border: 0; border-radius: 999px; background: var(--ink); color: #fff;
+      font: inherit; font-weight: 650; cursor: pointer;
+    }
+    .btn--ghost { background: #fff; color: var(--ink); border: 1.5px solid var(--line); }
+  </style>
+</head>
+<body>
+  <div class="bar">Booth scanner</div>
+  <div class="wrap">
+    <div class="panel">
+      <h1>Scan a booth QR code</h1>
+      <p class="lede">Point the camera at the QR card on the booth table. You'll be taken straight to your booth passport.</p>
+
+      <div id="reader"></div>
+      <p class="status" id="status">Starting the camera…</p>
+
+      <div class="notice" id="cameraHelp" hidden>
+        <p><strong>The camera did not start.</strong></p>
+        <p>Allow camera access when your browser asks, or scan the booth code with your normal phone camera app instead. You can also paste the booth link below.</p>
+      </div>
+
+      <div class="field">
+        <label for="manual">Or paste the booth link</label>
+        <input id="manual" type="text" inputmode="url" placeholder="https://script.google.com/…&amp;boothId=BOOTH-01&amp;token=…">
+      </div>
+      <button class="btn" type="button" id="go">Open this booth</button>
+      <button class="btn btn--ghost" type="button" id="retry">Restart the camera</button>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    // This page only ever redirects to a Google Apps Script booth link.
+    // Nothing is stored here and nothing is sent anywhere else.
+    var ALLOWED_HOST = 'script.google.com';
+
+    var scanner = null;
+    var running = false;
+    var handled = false;
+
+    function $(id) { return document.getElementById(id); }
+
+    function setStatus(text, kind) {
+      var el = $('status');
+      el.textContent = text;
+      el.className = 'status' + (kind ? ' is-' + kind : '');
+    }
+
+    function isBoothLink(text) {
+      var value = String(text || '').trim();
+      if (!/^https:\/\//i.test(value)) { return false; }
+      var url;
+      try { url = new URL(value); } catch (e) { return false; }
+      if (url.hostname !== ALLOWED_HOST) { return false; }
+      return !!(url.searchParams.get('boothId') && url.searchParams.get('token'));
+    }
+
+    function go(target) {
+      if (handled) { return; }
+      handled = true;
+      setStatus('Booth code read. Opening your passport…', 'good');
+      stop().then(function () { window.location.href = target; });
+    }
+
+    function stop() {
+      if (!scanner || !running) { return Promise.resolve(); }
+      running = false;
+      return scanner.stop().then(function () {
+        try { scanner.clear(); } catch (e) { /* already cleared */ }
+      }).catch(function () { /* nothing to stop */ });
+    }
+
+    function start() {
+      handled = false;
+      $('cameraHelp').hidden = true;
+
+      if (typeof Html5Qrcode === 'undefined') {
+        fail('The scanner library did not load. Check your connection, or paste the link below.');
+        return;
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        fail('This browser cannot open the camera. Use your phone camera app instead.');
+        return;
+      }
+
+      try {
+        scanner = scanner || new Html5Qrcode('reader', { verbose: false });
+      } catch (e) {
+        fail('The scanner could not start here. Paste the booth link below.');
+        return;
+      }
+
+      scanner.start(
+        { facingMode: 'environment' },
+        {
+          fps: 10,
+          aspectRatio: 1.0,
+          qrbox: function (w, h) {
+            var edge = Math.floor(Math.min(w, h) * 0.72);
+            return { width: edge, height: edge };
+          }
+        },
+        onScan,
+        function () { /* per-frame misses */ }
+      ).then(function () {
+        running = true;
+        setStatus('Hold the QR card inside the frame.');
+      }).catch(function (err) {
+        fail('The camera did not start: ' + (err && err.message ? err.message : err));
+      });
+    }
+
+    function fail(message) {
+      running = false;
+      setStatus(message, 'bad');
+      $('cameraHelp').hidden = false;
+    }
+
+    function onScan(decodedText) {
+      if (handled) { return; }
+      if (!isBoothLink(decodedText)) {
+        setStatus('That is not a booth QR code. Try the card on the booth table.', 'bad');
+        return;
+      }
+      go(decodedText);
+    }
+
+    $('go').addEventListener('click', function () {
+      var value = $('manual').value.trim();
+      if (!isBoothLink(value)) {
+        setStatus('Paste the full booth link, including boothId and token.', 'bad');
+        return;
+      }
+      go(value);
+    });
+
+    $('retry').addEventListener('click', function () {
+      stop().then(start);
+    });
+
+    window.addEventListener('pagehide', stop);
+
+    start();
+  })();
+  </script>
+</body>
+</html>
